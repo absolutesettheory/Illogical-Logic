@@ -1,407 +1,140 @@
 #!/usr/bin/env bash
 
-# ============================================================
-# certify.sh
-# RELATIONAL PROOF OF AUTHORSHIP / CONTENT COMMITMENT
-#
-# Author:
-#     Christopher Thomas Ronio
-#
-# Framework:
-#     Relational Boundary Framework
-#
-# Pipeline:
-#
-#     X
-#      |
-#      v
-#     T(X)
-#      |
-#      v
-#     F(X)
-#      |
-#      v
-#     Canonical Certificate
-#      |
-#      v
-#     SHA-256
-#      |
-#      v
-#     Commitment
-#
-# IMPORTANT:
-#     The commitment is calculated over the canonical
-#     certificate with the "commitment" field set to null.
-#
-#     This prevents a circular hash dependency.
-#
-#     SHA-256 proves content integrity/commitment.
-#     It does not independently establish legal authorship.
-# ============================================================
+# Create a content-integrity certificate for a source file.
+# A SHA-256 digest can show that content has not changed; it does not prove
+# authorship, identity, legal ownership, or the validity of a research claim.
 
 set -euo pipefail
 
-AUTHOR="Christopher Thomas Ronio"
-FRAMEWORK="Relational Boundary Framework"
-
-INPUT_FILE="${1:-Algebraic.md}"
-OUTPUT_FILE="${2:-rpa_certificate.json}"
-
-echo "========================================================"
-echo " RELATIONAL PROOF OF AUTHORSHIP / CONTENT COMMITMENT"
-echo "========================================================"
-echo " Author:    ${AUTHOR}"
-echo " Framework: ${FRAMEWORK}"
-echo " File:      ${INPUT_FILE}"
-echo "========================================================"
-
-
-# ============================================================
-# VALIDATE PYTHON
-# ============================================================
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+AUTHOR="${AUTHOR:-Christopher Thomas Ronio}"
+FRAMEWORK="${FRAMEWORK:-Relational Boundary Framework}"
+INPUT_FILE="${1:-${REPO_ROOT}/Algebraic.md}"
+OUTPUT_FILE="${2:-${PWD}/rpa_certificate.json}"
 
 if ! command -v python3 >/dev/null 2>&1; then
-    echo "[!] Error: python3 could not be found."
+    echo "Error: python3 is required." >&2
     exit 1
 fi
 
-
-# ============================================================
-# VALIDATE INPUT
-# ============================================================
-
-if [[ ! -f "${INPUT_FILE}" ]]; then
-    echo "[!] Error: File not found: ${INPUT_FILE}"
-    exit 1
-fi
-
-echo "[+] Input file verified."
-
-
-# ============================================================
-# EXECUTE RELATIONAL FRAMEWORK
-# ============================================================
-
-RPA_RESULT_FILE="$(mktemp)"
-
-cleanup() {
-    rm -f "${RPA_RESULT_FILE}"
-}
-
-trap cleanup EXIT
-
-
-if [[ -f "Examples/rpa_framework.py" ]]; then
-
-    echo "[*] Executing relational boundary framework..."
-
-    python3 Examples/rpa_framework.py \
-        --file "${INPUT_FILE}" \
-        --json > "${RPA_RESULT_FILE}"
-
-else
-
-    echo "[!] Examples/rpa_framework.py was not found."
-
-    echo "{" > "${RPA_RESULT_FILE}"
-    echo '  "classification": "UNAVAILABLE",' >> "${RPA_RESULT_FILE}"
-    echo '  "error": "Framework execution file not found."' >> "${RPA_RESULT_FILE}"
-    echo "}" >> "${RPA_RESULT_FILE}"
-
-fi
-
-
-# ============================================================
-# GENERATE CANONICAL CERTIFICATE
-# ============================================================
-
-python3 - \
-    "${AUTHOR}" \
-    "${FRAMEWORK}" \
-    "${INPUT_FILE}" \
-    "${RPA_RESULT_FILE}" \
-    "${OUTPUT_FILE}" <<'PY'
-
+python3 - "${INPUT_FILE}" "${OUTPUT_FILE}" "${REPO_ROOT}" "${AUTHOR}" "${FRAMEWORK}" <<'PY'
 import hashlib
 import json
+import os
 import pathlib
 import sys
+import tempfile
 from datetime import datetime, timezone
 
-
-# ------------------------------------------------------------
-# Arguments
-# ------------------------------------------------------------
-
-author = sys.argv[1]
-framework = sys.argv[2]
-input_file = pathlib.Path(sys.argv[3])
-result_file = pathlib.Path(sys.argv[4])
-output_file = pathlib.Path(sys.argv[5])
+input_arg, output_arg, repo_root_arg, author, framework = sys.argv[1:]
+repo_root = pathlib.Path(repo_root_arg).resolve()
 
 
-# ------------------------------------------------------------
-# Hash source document
-# ------------------------------------------------------------
+def resolve_input(value: str) -> pathlib.Path:
+    path = pathlib.Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    cwd_path = path.resolve()
+    if cwd_path.is_file():
+        return cwd_path
+    return (repo_root / path).resolve()
 
-file_hash = hashlib.sha256(
-    input_file.read_bytes()
-).hexdigest()
 
+input_file = resolve_input(input_arg)
+output_file = pathlib.Path(output_arg).expanduser()
+if not output_file.is_absolute():
+    output_file = (pathlib.Path.cwd() / output_file).resolve()
+else:
+    output_file = output_file.resolve()
 
-# ------------------------------------------------------------
-# Read F(X) result
-# ------------------------------------------------------------
+if not input_file.is_file():
+    raise SystemExit(f"Error: input file not found: {input_file}")
+if input_file == output_file:
+    raise SystemExit("Error: output file must not overwrite the input file")
 
 try:
+    source_bytes = input_file.read_bytes()
+except OSError as exc:
+    raise SystemExit(f"Error: cannot read input file: {exc}") from exc
 
-    framework_result = json.loads(
-        result_file.read_text(encoding="utf-8")
-    )
+source_hash = hashlib.sha256(source_bytes).hexdigest()
 
-except json.JSONDecodeError:
-
-    framework_result = {
-        "classification": "INVALID_FRAMEWORK_RESULT"
-    }
-
-
-# ------------------------------------------------------------
-# Canonical timestamp
-# ------------------------------------------------------------
-
-timestamp = datetime.now(
-    timezone.utc
-).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-# ------------------------------------------------------------
-# Extract F(X)
-#
-# The framework should ideally return:
-#
-# {
-#     "classification": "...",
-#     "state": "...",
-#     "behavior_history": [...],
-#     "iterations": ...
-# }
-# ------------------------------------------------------------
-
-f_x = {
-    "classification":
-        framework_result.get(
-            "classification",
-            "UNAVAILABLE"
-        ),
-
-    "state":
-        framework_result.get(
-            "state"
-        ),
-
-    "iterations":
-        framework_result.get(
-            "iterations"
-        ),
-
-    "cycle_length":
-        framework_result.get(
-            "cycle_length"
-        ),
-
-    "behavior_history":
-        framework_result.get(
-            "behavior_history",
-            []
-        )
-}
-
-
-# ------------------------------------------------------------
-# RELATIONAL BOUNDARY
-#
-# This records the computational interpretation of F(X).
-# ------------------------------------------------------------
-
-boundary = {
-
-    "inside":
-        "F(X) = INSIDE",
-
-    "outside":
-        "F(X) = OUTSIDE",
-
-    "line":
-        "T(X) -> F(X)",
-
-    "classification":
-        f_x["classification"]
-
-}
-
-
-# ------------------------------------------------------------
-# CANONICAL CERTIFICATE
-#
-# IMPORTANT:
-#
-# "commitment": None is intentional.
-#
-# This exact structure is what gets hashed.
-# The resulting SHA-256 digest is then inserted into
-# the final certificate.
-# ------------------------------------------------------------
-
+# The available RPA example produces a salted receipt; it does not implement
+# the F(X) classification described in the README. Do not claim that it did.
 certificate = {
-
-    "certificate_type":
-        "RELATIONAL_PROOF_OF_AUTHORSHIP",
-
-    "certificate_version":
-        "1.0",
-
-    "author_claim":
-        author,
-
-    "framework":
-        framework,
-
+    "certificate_type": "CONTENT_INTEGRITY_CERTIFICATE",
+    "certificate_version": "1.1",
+    "author_claim": author,
+    "framework": framework,
     "source": {
-
-        "file":
-            input_file.name,
-
-        "sha256":
-            file_hash
-
+        "file": input_file.name,
+        "sha256": source_hash,
     },
-
-    "relational_model": {
-
-        "X":
-            input_file.name,
-
-        "T(X)":
-            "Relational Boundary Transformation",
-
-        "F(X)":
-            f_x,
-
-        "boundary":
-            boundary
-
+    "framework_evaluation": {
+        "status": "NOT_PERFORMED",
+        "reason": (
+            "The available RPA example generates a salted receipt and does "
+            "not implement or validate the proposed F(X) classification."
+        ),
     },
-
-    "timestamp_utc":
-        timestamp,
-
+    "created_at_utc": datetime.now(timezone.utc).isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z"),
     "verification": {
-
-        "hash_algorithm":
-            "SHA-256",
-
-        "canonicalization":
-            "JSON sorted keys, UTF-8, compact separators",
-
-        "commitment_scope":
-            "Complete certificate payload with commitment=null"
-
+        "hash_algorithm": "SHA-256",
+        "canonicalization": "JSON sorted keys, UTF-8, compact separators",
+        "commitment_scope": "Complete certificate payload with commitment=null",
+        "limitations": (
+            "The digest can detect content changes when compared with a "
+            "trusted copy. It does not independently establish authorship, "
+            "identity, legal ownership, or scientific validity."
+        ),
     },
-
-    # Reserved during hashing.
-    "commitment":
-        None
-
+    "commitment": None,
 }
-
-
-# ------------------------------------------------------------
-# CANONICAL SERIALIZATION
-# ------------------------------------------------------------
 
 canonical_bytes = json.dumps(
     certificate,
     sort_keys=True,
     separators=(",", ":"),
-    ensure_ascii=False
+    ensure_ascii=False,
 ).encode("utf-8")
-
-
-# ------------------------------------------------------------
-# CALCULATE CERTIFICATE COMMITMENT
-# ------------------------------------------------------------
-
-certificate_hash = hashlib.sha256(
-    canonical_bytes
-).hexdigest()
-
-
-# ------------------------------------------------------------
-# INSERT COMMITMENT
-# ------------------------------------------------------------
-
+certificate_hash = hashlib.sha256(canonical_bytes).hexdigest()
 certificate["commitment"] = {
-
-    "algorithm":
-        "SHA-256",
-
-    "digest":
-        certificate_hash
-
+    "algorithm": "SHA-256",
+    "digest": certificate_hash,
 }
 
+try:
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="\n",
+        dir=output_file.parent,
+        prefix=f".{output_file.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary:
+        temporary_path = pathlib.Path(temporary.name)
+        json.dump(certificate, temporary, indent=2, sort_keys=True, ensure_ascii=False)
+        temporary.write("\n")
+        temporary.flush()
+        os.fsync(temporary.fileno())
+    os.replace(temporary_path, output_file)
+except OSError as exc:
+    if temporary_path is not None:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    raise SystemExit(f"Error: cannot write certificate: {exc}") from exc
 
-# ------------------------------------------------------------
-# WRITE FINAL CERTIFICATE
-# ------------------------------------------------------------
-
-output_file.write_text(
-    json.dumps(
-        certificate,
-        indent=4,
-        sort_keys=True,
-        ensure_ascii=False
-    ) + "\n",
-    encoding="utf-8"
-)
-
-
-# ------------------------------------------------------------
-# OUTPUT
-# ------------------------------------------------------------
-
-print()
-print("[+] RELATIONAL CERTIFICATE GENERATED")
-print()
-print(f"    Author:       {author}")
-print(f"    Source:       {input_file.name}")
-print(f"    File SHA-256: {file_hash}")
-print(f"    F(X):         {f_x['classification']}")
-print(f"    Certificate:  {certificate_hash}")
-print(f"    Output:       {output_file}")
-print()
-
+print("Content-integrity certificate generated.")
+print(f"  Source SHA-256: {source_hash}")
+print(f"  Commitment:     {certificate_hash}")
+print(f"  Output:         {output_file}")
+print("  Note: SHA-256 does not prove authorship or legal ownership.")
 PY
-
-
-# ============================================================
-# FINAL REPORT
-# ============================================================
-
-echo "========================================================"
-echo " RELATIONAL CERTIFICATION COMPLETE"
-echo "========================================================"
-echo " Author:      ${AUTHOR}"
-echo " Framework:   ${FRAMEWORK}"
-echo " Source:      ${INPUT_FILE}"
-echo " Certificate: ${OUTPUT_FILE}"
-echo "========================================================"
-echo ""
-echo "F(X) is included in the canonical certificate payload."
-echo "The certificate commitment is the SHA-256 digest of"
-echo "that canonical payload with commitment=null."
-echo ""
-echo "This provides deterministic content verification."
-echo "It does not independently establish legal authorship."
-echo "========================================================"
